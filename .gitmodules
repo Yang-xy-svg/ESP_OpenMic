@@ -1,0 +1,16 @@
+[submodule "components/ESP32-RevK"]
+	path = components/ESP32-RevK
+	url = https://codeberg.org/RevK/ESP32-RevK
+[submodule "ftdizap"]
+	path = ftdizap
+	url = https://codeberg.org/RevK/ftdizap
+	branch = main
+[submodule "PCB/PCBCase"]
+	path = PCB/PCBCase
+	url = https://codeberg.org/RevK/PCBCase
+[submodule "components/ESP32-SIP"]
+	path = components/ESP32-SIP
+	url = https://codeberg.org/RevK/ESP32-SIP
+[submodule "components/ESP32-IR"]
+	path = components/ESP32-IR
+	url = https://codeberg.org/RevK/ESP32-IR
