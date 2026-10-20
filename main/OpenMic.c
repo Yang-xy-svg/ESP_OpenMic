@@ -1,5 +1,5 @@
 /* OpenMic app */
-/* Copyright ©2024 Adrian Kennard, Andrews & Arnold Ltd.See LICENCE file for details .GPL 3.0 */
+/* Copyright Â©2024 Adrian Kennard, Andrews & Arnold Ltd.See LICENCE file for details .GPL 3.0 */
 
 static const char TAG[] = "OpenMic";
 
@@ -28,6 +28,7 @@ static const char TAG[] = "OpenMic";
 #include "math.h"
 #include "esp_vfs_fat.h"
 #include <dirent.h>
+#include <sys/stat.h>
 #include <sip.h>
 #include <halib.h>
 #include <ir.h>
@@ -368,6 +369,196 @@ register_get_uri (const char *uri, esp_err_t (*handler) (httpd_req_t *r))
    register_uri (&uri_struct);
 }
 
+// Recording file names are NNNN-YYYYMMDDTHHMMSS.WAV (or NNNN-.WAV), so allow only safe characters
+static int
+wav_name_ok (const char *name)
+{
+   if (!name || !isdigit ((unsigned char) *name))
+      return 0;
+   const char *p = name;
+   while (isdigit ((unsigned char) *p))
+      p++;
+   if (*p != '-')
+      return 0;
+   size_t l = strlen (name);
+   if (l < 6 || l > 80 || strcasecmp (name + l - 4, ".wav"))
+      return 0;
+   for (p = name; *p; p++)
+      if (!isalnum ((unsigned char) *p) && *p != '.' && *p != '-' && *p != '_')
+         return 0;
+   return 1;
+}
+
+static void
+web_size (char *buf, size_t len, long long size)
+{
+   if (size >= 1024 * 1024)
+      snprintf (buf, len, "%.1f MB", size / 1048576.0);
+   else if (size >= 1024)
+      snprintf (buf, len, "%.1f kB", size / 1024.0);
+   else
+      snprintf (buf, len, "%lld B", size);
+}
+
+typedef struct
+{
+   char *name;
+   long num;
+   long long size;
+} wav_t;
+
+static int
+wav_sort (const void *a, const void *b)
+{                               // Newest (highest number) first
+   const wav_t *x = a,
+      *y = b;
+   return (x->num < y->num) - (x->num > y->num);
+}
+
+static esp_err_t
+web_files (httpd_req_t *req)
+{                               // List WAV files on SD card
+   idle = 0;
+   revk_web_head (req, "Recordings");
+   revk_web_send (req, "<h1>Recordings</h1>");
+   if (!b.sdmount)
+   {
+      revk_web_send (req, "<p>No SD card mounted.</p>");
+      return revk_web_foot (req, 1, 0, NULL);
+   }
+   wav_t *files = NULL;
+   int count = 0,
+      max = 0;
+   DIR *dir = opendir (sd_dir);
+   if (dir)
+   {
+      struct dirent *entry;
+      while ((entry = readdir (dir)))
+         if (entry->d_type == DT_REG && wav_name_ok (entry->d_name))
+         {
+            if (count == max)
+            {
+               max = max ? max * 2 : 16;
+               wav_t *new = realloc (files, max * sizeof (*files));
+               if (!new)
+                  break;
+               files = new;
+            }
+            char *filename = NULL;
+            asprintf (&filename, "%s/%s", sd_dir, entry->d_name);
+            struct stat s = { 0 };
+            int ok = filename && !stat (filename, &s);
+            free (filename);
+            if (!ok)
+               continue;
+            files[count].name = strdup (entry->d_name);
+            if (!files[count].name)
+               continue;
+            files[count].num = atoi (entry->d_name);
+            files[count].size = s.st_size;
+            count++;
+         }
+      closedir (dir);
+   }
+   if (count)
+      qsort (files, count, sizeof (*files), wav_sort);
+   long long total = 0;
+   for (int i = 0; i < count; i++)
+      total += files[i].size;
+   char totalbuf[32];
+   web_size (totalbuf, sizeof (totalbuf), total);
+   revk_web_send (req, "<p>%d file%s, %s</p>", count, count == 1 ? "" : "s", totalbuf);
+   if (count)
+   {
+      revk_web_send (req, "<table><tr><th align=left>File</th><th align=right>Size</th></tr>");
+      for (int i = 0; i < count; i++)
+      {
+         char sizebuf[32];
+         web_size (sizebuf, sizeof (sizebuf), files[i].size);
+         revk_web_send (req, "<tr><td><a href=\"/files/download?name=%s\">%s</a></td><td align=right>%s</td></tr>",
+                        files[i].name, files[i].name, sizebuf);
+      }
+      revk_web_send (req, "</table>");
+   } else
+      revk_web_send (req, "<p>No recordings yet.</p>");
+   for (int i = 0; i < count; i++)
+      free (files[i].name);
+   free (files);
+   return revk_web_foot (req, 1, 0, NULL);
+}
+
+static esp_err_t
+web_file_download (httpd_req_t *req)
+{                               // Download one WAV file
+   idle = 0;
+   char name[128] = "";
+   jo_t j = revk_web_query (req);
+   if (j)
+   {
+      if (jo_find (j, "name") == JO_STRING)
+      {
+         char *n = jo_strdup (j);
+         if (n)
+         {
+            snprintf (name, sizeof (name), "%s", n);
+            free (n);
+         }
+      }
+      jo_free (&j);
+   }
+   if (!wav_name_ok (name))
+      return httpd_resp_send_err (req, HTTPD_400_BAD_REQUEST, "Bad filename");
+   if (!b.sdmount)
+   {
+      httpd_resp_set_status (req, "503 Service Unavailable");
+      return httpd_resp_sendstr (req, "SD card not mounted");
+   }
+   if (mic_mode == MIC_RECORD || sdfile)
+   {                            // Avoid reading a file being written
+      httpd_resp_set_status (req, "503 Service Unavailable");
+      return httpd_resp_sendstr (req, "Recording - try again when stopped");
+   }
+   char *filename = NULL;
+   asprintf (&filename, "%s/%s", sd_dir, name);
+   FILE *i = filename ? fopen (filename, "rb") : NULL;
+   if (!i)
+   {
+      free (filename);
+      return httpd_resp_send_err (req, HTTPD_404_NOT_FOUND, "No such file");
+   }
+   struct stat s = { 0 };
+   if (fstat (fileno (i), &s))
+      s.st_size = 0;
+#define	WEB_BLOCK	4096
+   char *buf = mallocspi (WEB_BLOCK);
+   if (!buf)
+   {
+      fclose (i);
+      free (filename);
+      return httpd_resp_send_err (req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
+   }
+   httpd_resp_set_type (req, "audio/wav");
+   char cd[sizeof (name) + 32];
+   snprintf (cd, sizeof (cd), "attachment; filename=\"%s\"", name);
+   httpd_resp_set_hdr (req, "Content-Disposition", cd);
+   httpd_resp_set_hdr (req, "Cache-Control", "no-store");
+   ESP_LOGE (TAG, "Download %s %lld bytes", name, (long long) s.st_size);
+   esp_err_t e = ESP_OK;
+   size_t len;
+   while ((len = fread (buf, 1, WEB_BLOCK, i)) > 0)
+   {
+      if ((e = httpd_resp_send_chunk (req, buf, len)) != ESP_OK)
+         break;
+      idle = 0;
+   }
+   if (e == ESP_OK)
+      httpd_resp_send_chunk (req, NULL, 0);     // End of chunked response
+   free (buf);
+   fclose (i);
+   free (filename);
+   return e;
+}
+
 static esp_err_t
 web_root (httpd_req_t *req)
 {
@@ -376,6 +567,8 @@ web_root (httpd_req_t *req)
       return revk_web_settings (req);   // Direct to web set up
    revk_web_head (req, "OpenMic");
    revk_web_send (req, "<h1>%s</h1>", *hostname ? hostname : revk_app);
+   if (sdcmd.set)
+      revk_web_send (req, "<form action=/files method=get><input type=submit value=\"Recordings (WAV)\"></form>");
    const char *er = NULL;
    jo_t j = revk_web_query (req);
    if (j)
@@ -1784,12 +1977,14 @@ app_main ()
    if (micws.num == spklrc.num && micclock.num == spkbclk.num)
       b.sharedi2s = 1;
    httpd_config_t config = HTTPD_DEFAULT_CONFIG ();     // When updating the code below, make sure this is enough
-   config.max_uri_handlers = 2 + revk_num_web_handlers ();
+   config.max_uri_handlers = 4 + revk_num_web_handlers ();
    if (!httpd_start (&webserver, &config))
    {
       revk_web_settings_add (webserver);
       register_get_uri ("/", web_root);
       register_post_uri ("/", web_root);
+      register_get_uri ("/files", web_files);
+      register_get_uri ("/files/download", web_file_download);
    }
    revk_gpio_output (rgbpwr, 1);        // Power on LED
    if (rgbstatus[0].set)

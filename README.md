@@ -127,6 +127,8 @@ Options are planned:-
 
 An option exists to upload files to a web page as a `POST`, renaming the file slightly once uploaded so not uploaded twice. This is done when you hold the button to *power off`*.
 
+Recordings can also be downloaded directly over WiFi. Open `http://<device>/` in a browser on a phone or computer and press *Recordings (WAV)*, or go straight to `http://<device>/files`, then tap a file to download it. WiFi is off whilst recording (unless `wifirecord` is disabled).
+
 An option exists to delete old files if space needed for new file.
 
 ## SIP working
