@@ -27,7 +27,7 @@ s	sd.upload		.live	// Where to post, then delete, files on power off
 bit	sd.usb		1		// USB mass storage access to SD card
 bit	sd.delete	1	.live	// Auto delete old files if space needed for new file
 
-u32	auto.off	900	.unit="s",.live	// Auto power off if idle
+u32	auto.off	0	.unit="s",.live	// Auto power off if idle
 bit	auto.usb					// Auto off only if USB disconnected
 
 gpio	button		"-3↓"		// Button

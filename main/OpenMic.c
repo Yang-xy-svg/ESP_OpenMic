@@ -32,6 +32,7 @@ static const char TAG[] = "OpenMic";
 #include <sip.h>
 #include <halib.h>
 #include <ir.h>
+#include "ble.h"
 
 float voltage = NAN;
 #define ADC_SCALE       (3)     // Resistor ratio
@@ -260,12 +261,14 @@ app_callback (int client, const char *prefix, const char *target, const char *su
    return NULL;
 }
 
+#ifdef CONFIG_REVK_HALIB
 void
 send_ha_config (void)
 {
    b.ha = 0;
- ha_config_switch ("record", name: "Record", cmd: "/record", stat: "", field: "record", icon: "mdi:microphone", delete:!haenable);
+   ha_config_switch ("record", .name = "Record", .cmd = "/record", .stat = "", .field = "record", .icon = "mdi:microphone", .delete = !haenable);
 }
+#endif
 
 void
 revk_state_extra (jo_t j)
@@ -1959,6 +1962,9 @@ app_main ()
    //ESP_LOGE (TAG, "Started");
    revk_boot (&app_callback);
    revk_start ();
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+   openmic_ble_init ();
+#endif
    sd_mutex = xSemaphoreCreateBinary ();
    xSemaphoreGive (sd_mutex);
    slot.clk = sdclk.num;
@@ -2046,6 +2052,19 @@ app_main ()
       }
       usleep (100000);
       uint32_t up = uptime ();
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+      openmic_ble_status_t ble_status = {
+         .recording = b.micon,
+         .sd_present = b.sdpresent,
+         .sd_mounted = b.sdmount,
+         .battery_mv = isfinite (voltage) ? (int) voltage : 0,
+      };
+      openmic_ble_status_update (&ble_status);
+      if (openmic_ble_wifi_on_requested ())
+         revk_enable_wifi ();
+      if (openmic_ble_wifi_off_requested ())
+         revk_disable_wifi ();
+#endif
       if (b.status)
       {
          b.status = 0;
@@ -2059,8 +2078,10 @@ app_main ()
             b.die = 1;
       } else
          idle = 0;
+#ifdef CONFIG_REVK_HALIB
       if (b.ha)
          send_ha_config ();
+#endif
       if (revk_gpio_get (button))
       {                         // Pressed
          if (b.press < 15)
